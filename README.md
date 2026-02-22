@@ -12,12 +12,19 @@ Add to your Claude Code config (`~/.claude.json` under `mcpServers`):
   "command": "npx",
   "args": ["-y", "@lumiversehr/mcp-server-comfy-api"],
   "env": {
-    "COMFY_API_URL": "https://comfy-api.nichetide.com"
+    "COMFY_API_URL": "https://your-comfy-api-host.com",
+    "COMFY_API_KEY": "your-api-key-here"
   }
 }
 ```
 
 Restart Claude Code. Done.
+
+## Authentication
+
+The backend requires an API key for all requests. Set `COMFY_API_KEY` in the MCP server's `env` config to match the `API_KEY` value configured on the backend's `.env` file.
+
+Requests without a valid `X-API-Key` header will be rejected with 401.
 
 ## Tools
 
@@ -53,6 +60,7 @@ From Claude Code:
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
 | `COMFY_API_URL` | Backend API base URL | `https://comfy-api.nichetide.com` |
+| `COMFY_API_KEY` | API key for authentication | *(required)* |
 
 ## How It Works
 
@@ -60,11 +68,13 @@ From Claude Code:
 2. All generated images are auto-assigned to a private "API_generated" series
 3. Jobs run at priority 5 (higher than default web UI jobs)
 4. `download_image` fetches the image bytes and saves to your local filesystem
+5. All requests include the `X-API-Key` header for authentication
 
 ## Requirements
 
 - Node.js 18+
 - Network access to the ComfyUI API backend
+- Valid API key
 
 ## License
 

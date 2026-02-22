@@ -6,6 +6,7 @@ import { z } from "zod";
 
 const API_BASE_URL =
   process.env.COMFY_API_URL || "https://comfy-api.nichetide.com";
+const API_KEY = process.env.COMFY_API_KEY || "";
 const POLL_INTERVAL = 2000;
 const POLL_TIMEOUT = 180000;
 
@@ -15,9 +16,14 @@ async function apiFetch(
   path: string,
   options?: RequestInit
 ): Promise<Response> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
+    ...(options?.headers as Record<string, string> | undefined),
+  };
   const res = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
-    headers: { "Content-Type": "application/json", ...options?.headers },
+    headers,
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -259,7 +265,9 @@ server.registerTool(
     const absPath = resolve(target);
     await mkdir(dirname(absPath), { recursive: true });
 
-    const res = await fetch(`${API_BASE_URL}/outputs/${filename}`);
+    const res = await fetch(`${API_BASE_URL}/outputs/${filename}`, {
+      headers: API_KEY ? { "X-API-Key": API_KEY } : {},
+    });
     if (!res.ok) throw new Error(`Download failed: ${res.status}`);
     const buffer = Buffer.from(await res.arrayBuffer());
     await writeFile(absPath, buffer);
