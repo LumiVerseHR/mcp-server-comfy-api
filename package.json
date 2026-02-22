@@ -1,0 +1,42 @@
+{
+  "name": "@lumiversehr/mcp-server-comfy-api",
+  "version": "1.0.0",
+  "description": "MCP server for generating images with ComfyUI API (z-image-turbo)",
+  "type": "module",
+  "bin": {
+    "mcp-server-comfy-api": "./build/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "build"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "comfyui",
+    "image-generation",
+    "z-image",
+    "claude-code",
+    "ai"
+  ],
+  "author": "LumiVerse",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lumiversehr/mcp-server-comfy-api.git"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}
