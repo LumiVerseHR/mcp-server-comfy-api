@@ -285,6 +285,81 @@ server.registerTool(
 );
 
 server.registerTool(
+  "remove_background",
+  {
+    title: "Remove Background",
+    description:
+      "Remove the background from a local image and save a transparent RGBA PNG. Sends the image to the ComfyUI API for background removal.",
+    inputSchema: {
+      image_path: z
+        .string()
+        .describe("Path to the local input image (PNG/JPG/WebP)"),
+      output_path: z
+        .string()
+        .optional()
+        .describe(
+          'Where to save the result. Defaults to "<input>_nobg.png" next to the input.'
+        ),
+      model: z
+        .enum([
+          "u2net",
+          "u2netp",
+          "u2net_human_seg",
+          "isnet-general-use",
+          "isnet-anime",
+          "silueta",
+        ])
+        .default("u2net")
+        .describe(
+          "Background-removal model: u2net (general), u2netp (lighter/faster), u2net_human_seg (people), isnet-general-use (higher quality), isnet-anime, silueta (portraits)"
+        ),
+      alpha_matting: z
+        .boolean()
+        .default(false)
+        .describe("Enable alpha matting for cleaner edges (slower)"),
+    },
+  },
+  async ({ image_path, output_path, model, alpha_matting }) => {
+    const { readFile, writeFile, mkdir } = await import("node:fs/promises");
+    const { dirname, resolve } = await import("node:path");
+
+    const inputAbs = resolve(image_path);
+    const imageB64 = (await readFile(inputAbs)).toString("base64");
+
+    const outTarget =
+      output_path || inputAbs.replace(/\.[^./\\]+$/, "") + "_nobg.png";
+    const outAbs = resolve(outTarget);
+    await mkdir(dirname(outAbs), { recursive: true });
+
+    const res = await apiFetch("/api/rmbg/remove", {
+      method: "POST",
+      body: JSON.stringify({ image: imageB64, model, alpha_matting }),
+    });
+    const data: { image: string; inference_time_ms?: number } =
+      await res.json();
+
+    const b64 = data.image.replace(/^data:[^,]+,/, "");
+    const buffer = Buffer.from(b64, "base64");
+    await writeFile(outAbs, buffer);
+
+    const sizeKb = (buffer.length / 1024).toFixed(1);
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: [
+            "Background removed!",
+            `Input: ${inputAbs}`,
+            `Output: ${outAbs} (${sizeKb} KB, model=${model})`,
+            `Inference: ${(data.inference_time_ms ?? 0).toFixed(0)}ms`,
+          ].join("\n"),
+        },
+      ],
+    };
+  }
+);
+
+server.registerTool(
   "get_prompt_guide",
   {
     title: "Get Prompt Guide",
