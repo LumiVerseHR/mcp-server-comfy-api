@@ -374,6 +374,130 @@ server.registerTool(
   }
 );
 
+// --- Pipelines (callable node-graph workflows) ---
+
+interface PipelineSummary {
+  id: number;
+  name: string;
+}
+
+async function resolvePipeline(pipeline: string): Promise<PipelineSummary> {
+  const res = await apiFetch("/pipelines");
+  const list: PipelineSummary[] = await res.json();
+  const s = String(pipeline).trim();
+  const found =
+    (/^\d+$/.test(s) ? list.find((p) => p.id === Number(s)) : undefined) ??
+    list.find((p) => p.name === s) ??
+    list.find((p) => p.name.toLowerCase() === s.toLowerCase());
+  if (!found) throw new Error(`pipeline not found: ${pipeline}`);
+  return found;
+}
+
+server.registerTool(
+  "list_pipelines",
+  {
+    title: "List Pipelines",
+    description: "List saved pipelines (node-graph workflows) that can be run via run_pipeline.",
+    inputSchema: {},
+  },
+  async () => {
+    const res = await apiFetch("/pipelines");
+    const list: PipelineSummary[] = await res.json();
+    const text = list.length
+      ? list.map((p) => `#${p.id}  ${p.name}`).join("\n")
+      : "No saved pipelines.";
+    return { content: [{ type: "text" as const, text }] };
+  }
+);
+
+server.registerTool(
+  "get_pipeline_params",
+  {
+    title: "Get Pipeline Parameters",
+    description:
+      "List a pipeline's parameters (name, type, default) so you know what inputs run_pipeline accepts.",
+    inputSchema: { pipeline: z.string().describe("Pipeline name or numeric id") },
+  },
+  async ({ pipeline }) => {
+    const { id, name } = await resolvePipeline(pipeline);
+    const res = await apiFetch(`/pipelines/${id}/params`);
+    const data: { params: Array<{ name: string; type: string; default?: unknown }> } =
+      await res.json();
+    const params = data.params ?? [];
+    const text = params.length
+      ? params
+          .map(
+            (p) =>
+              `- ${p.name} (${p.type})${
+                p.default != null && p.default !== "" ? ` default=${JSON.stringify(p.default)}` : ""
+              }`
+          )
+          .join("\n")
+      : "(no parameters)";
+    return {
+      content: [{ type: "text" as const, text: `Pipeline "${name}" (#${id}) parameters:\n${text}` }],
+    };
+  }
+);
+
+server.registerTool(
+  "run_pipeline",
+  {
+    title: "Run Pipeline",
+    description:
+      "Run a saved pipeline with named inputs (text/number/image base64). Runs synchronously and returns the output image filename(s)/text. Use download_image(filename) to save an output image.",
+    inputSchema: {
+      pipeline: z.string().describe("Pipeline name or numeric id"),
+      inputs: z
+        .record(z.any())
+        .optional()
+        .describe('Parameter values, e.g. {"tile": "bathroom"} (see get_pipeline_params)'),
+    },
+  },
+  async ({ pipeline, inputs }) => {
+    const { id, name } = await resolvePipeline(pipeline);
+    const res = await apiFetch(`/pipelines/${id}/run`, {
+      method: "POST",
+      body: JSON.stringify({ inputs: inputs ?? {}, wait: true }),
+    });
+    const data: {
+      status: string;
+      error?: string;
+      outputs?: Array<{
+        type?: string;
+        status?: string;
+        image?: string;
+        video?: string;
+        text?: string;
+        error?: string;
+      }>;
+    } = await res.json();
+
+    if (data.status !== "completed") {
+      return {
+        content: [
+          { type: "text" as const, text: `Pipeline "${name}" run ${data.status}: ${data.error ?? "unknown error"}` },
+        ],
+      };
+    }
+
+    const lines = (data.outputs ?? []).map((o) => {
+      if (o.image) return `image: ${o.image}  →  download_image("${o.image}")`;
+      if (o.video) return `video: ${o.video}`;
+      if (o.text != null) return `text: ${o.text}`;
+      return `${o.type ?? "node"}: ${o.status ?? ""}`;
+    });
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Ran "${name}" (#${id}) — completed.\nOutputs:\n${lines.join("\n") || "(none)"}`,
+        },
+      ],
+    };
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
