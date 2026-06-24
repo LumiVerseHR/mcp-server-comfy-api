@@ -34,6 +34,9 @@ Requests without a valid `X-API-Key` header will be rejected with 401.
 | `get_job_status` | Check status of a generation job by ID. |
 | `download_image` | Download a generated image to the local filesystem. |
 | `remove_background` | Remove the background from a local image, saving a transparent RGBA PNG. |
+| `list_pipelines` | List saved node-graph pipelines that can be run. |
+| `get_pipeline_params` | List a pipeline's parameters (name, type, default). |
+| `run_pipeline` | Run a saved pipeline with named inputs (text/number/image); returns output image filename(s)/text. Use `download_image` to save them. |
 | `get_prompt_guide` | Retrieve the Z-Image Turbo prompt guide for writing effective prompts. |
 
 ## Usage Examples
@@ -45,6 +48,7 @@ From Claude Code:
 - *"Download that image to ./sunset.jpg"*
 - *"What's the status of job abc-123?"*
 - *"Remove the background from ./photo.jpg"*
+- *"List the comfy-api pipelines"* → *"Run IsometricTiles with tile = bathroom and download it"*
 
 ## remove_background Parameters
 
