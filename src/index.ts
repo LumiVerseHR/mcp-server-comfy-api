@@ -70,11 +70,15 @@ server.registerTool(
   {
     title: "Generate Image",
     description:
-      'Generate an image using z-image-turbo model. Submits a job and waits for completion (up to 3 min). Images go to the private "API_generated" series. Use get_prompt_guide for tips on writing effective prompts.',
+      'Generate an image and wait for it (up to 3 min). Goes to the private "API_generated" series. Three models, all guidance-distilled, so describe what you want rather than what you do not — a negative phrase conditions these toward the thing it names. z-image-turbo: fast, ~3s, the default. qwen-image-2.1: exact text rendering, transparent PNGs, ~16s. krea2-turbo: 12B, strong text and skin detail, ~9s. A cold model costs 10-30s to load; model_status shows what is already resident. Use get_prompt_guide for prompt tips.',
     inputSchema: {
       prompt: z
         .string()
         .describe("Text description of the image to generate"),
+      model: z
+        .enum(["z-image-turbo", "qwen-image-2.1", "krea2-turbo"])
+        .default("z-image-turbo")
+        .describe("Which model renders it"),
       width: z
         .number()
         .int()
@@ -94,8 +98,10 @@ server.registerTool(
         .int()
         .min(1)
         .max(50)
-        .default(9)
-        .describe("Diffusion steps (9 recommended for turbo)"),
+        .optional()
+        .describe(
+          "Diffusion steps. Omit to use the model's own default (9 / 25 / 8), which is almost always right."
+        ),
       cfg: z
         .number()
         .min(0)
@@ -109,16 +115,18 @@ server.registerTool(
         .describe("Random seed for reproducibility. Omit for random."),
     },
   },
-  async ({ prompt, width, height, steps, cfg, seed }) => {
+  async ({ prompt, model, width, height, steps, cfg, seed }) => {
     const seriesId = await getApiGeneratedSeriesId();
 
     const createRes = await apiFetch("/jobs", {
       method: "POST",
       body: JSON.stringify({
         prompt,
+        model,
         width,
         height,
-        steps,
+        // Sent only when chosen: omitted, the backend applies this model's default.
+        ...(steps === undefined ? {} : { steps }),
         cfg,
         seed: seed ?? null,
         priority: 5,
@@ -195,6 +203,182 @@ server.registerTool(
         },
       ],
     };
+  }
+);
+
+const VIDEO_POLL_TIMEOUT = 900000; // video is minutes, not seconds
+
+server.registerTool(
+  "generate_video",
+  {
+    title: "Generate Video",
+    description:
+      'Animate an image that was already generated, and wait for it. Both models are image-to-video, so generate_image first and pass the job id it returns. minimax-h3: 12B, 24fps, generates its own soundtrack in the same pass, ~41 GB of VRAM, the default and the one that works. ltx-2: wants ~52 GB, which this machine often cannot free, so it may fail on arrival. Video takes minutes; check model_status first, since loading one of these evicts whatever is resident.',
+    inputSchema: {
+      prompt: z
+        .string()
+        .describe(
+          "The motion to add. Describe what moves; the source image already settles how the scene looks."
+        ),
+      source_job_id: z
+        .string()
+        .describe("Job id of the image to animate, from generate_image"),
+      model: z
+        .enum(["minimax-h3", "ltx-2"])
+        .default("minimax-h3")
+        .describe("Which model renders it"),
+      width: z
+        .number()
+        .int()
+        .min(256)
+        .max(1920)
+        .default(960)
+        .describe("Video width (a multiple of 32 for H3)"),
+      height: z
+        .number()
+        .int()
+        .min(256)
+        .max(1080)
+        .default(544)
+        .describe("Video height (a multiple of 32 for H3)"),
+      frames: z
+        .number()
+        .int()
+        .min(9)
+        .max(257)
+        .default(124)
+        .describe(
+          "Frames at 24fps. H3 decodes 17n+5 and rounds up to the next valid count, between 5 and 15 seconds. 124 is ~5.2s."
+        ),
+      audio: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Generate a soundtrack. H3 denoises audio alongside the picture, so turning this off does not save time; it produces a silent file."
+        ),
+    },
+  },
+  async ({ prompt, source_job_id, model, width, height, frames, audio }) => {
+    const createRes = await apiFetch("/video/jobs", {
+      method: "POST",
+      body: JSON.stringify({
+        prompt,
+        source_job_id,
+        model,
+        width,
+        height,
+        frames,
+        audio,
+        priority: 5,
+      }),
+    });
+    const job: { job_id: string } = await createRes.json();
+    const jobId = job.job_id;
+
+    const start = Date.now();
+    while (Date.now() - start < VIDEO_POLL_TIMEOUT) {
+      const statusRes = await apiFetch(`/video/jobs/${jobId}`);
+      const status: {
+        status: string;
+        video_filename?: string;
+        error?: string;
+      } = await statusRes.json();
+
+      if (status.status === "completed") {
+        const name = status.video_filename || "(see job)";
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: [
+                "Video generated.",
+                `Job ID: ${jobId}`,
+                `Model: ${model}`,
+                `File: ${name}`,
+                `URL: ${API_BASE_URL}/video/download/${name}`,
+                `Frames: ${frames} (~${(frames / 24).toFixed(1)}s at 24fps)`,
+                audio ? "" : "Silent (audio disabled)",
+              ]
+                .filter(Boolean)
+                .join("\n"),
+            },
+          ],
+        };
+      }
+      if (status.status === "failed") {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Video generation failed.\nJob ID: ${jobId}\nError: ${status.error || "unknown"}`,
+            },
+          ],
+        };
+      }
+      if (status.status === "cancelled") {
+        return {
+          content: [
+            { type: "text" as const, text: `Job was cancelled.\nJob ID: ${jobId}` },
+          ],
+        };
+      }
+      await sleep(POLL_INTERVAL);
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Still rendering after ${VIDEO_POLL_TIMEOUT / 1000}s.\nJob ID: ${jobId}\nCheck later with get_job_status.`,
+        },
+      ],
+    };
+  }
+);
+
+server.registerTool(
+  "model_status",
+  {
+    title: "Model Status",
+    description:
+      "What is loaded on the GPU right now and how much room is left. Worth checking before a batch: a resident model starts immediately, a cold one pays a load first. Models unload themselves after 30 minutes idle, so this changes on its own.",
+    inputSchema: {},
+  },
+  async () => {
+    const res = await apiFetch("/models/status");
+    const d: {
+      gpu: { free_gb: number; total_gb: number };
+      models: Array<{
+        name: string;
+        service: string;
+        vram_gb: number | null;
+        idle_seconds: number | null;
+        in_use: boolean;
+      }>;
+      switchable: Array<{ id: string; loaded: boolean; estimated_gb: number | null }>;
+      idle_unload_minutes: number;
+    } = await res.json();
+
+    const lines = [
+      `GPU: ${d.gpu.free_gb} GB free of ${d.gpu.total_gb} GB`,
+      "",
+      "Image models:",
+      ...d.switchable.map(
+        (s) =>
+          `  ${s.id.padEnd(16)} ${s.loaded ? "loaded" : `not loaded (~${s.estimated_gb} GB to load)`}`
+      ),
+    ];
+    if (d.models.length) {
+      lines.push("", `Resident (${d.models.length}):`);
+      for (const m of d.models) {
+        const idle = m.in_use ? "in use" : `idle ${m.idle_seconds}s`;
+        lines.push(
+          `  ${(m.name || "").padEnd(24)} ${m.vram_gb} GB  ${idle}  [${m.service}]`
+        );
+      }
+    }
+    lines.push("", `Unloaded automatically after ${d.idle_unload_minutes} min idle.`);
+    return { content: [{ type: "text" as const, text: lines.join("\n") }] };
   }
 );
 
