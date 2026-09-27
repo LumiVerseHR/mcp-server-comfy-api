@@ -295,7 +295,9 @@ server.registerTool(
                 `Job ID: ${jobId}`,
                 `Model: ${model}`,
                 `File: ${name}`,
-                `URL: ${API_BASE_URL}/video/download/${name}`,
+                status.video_filename
+                  ? `Save it with download_image("${name}").`
+                  : "",
                 `Frames: ${frames} (~${(frames / 24).toFixed(1)}s at 24fps)`,
                 audio ? "" : "Silent (audio disabled)",
               ]
@@ -424,14 +426,14 @@ server.registerTool(
 server.registerTool(
   "download_image",
   {
-    title: "Download Image",
+    title: "Download Image or Video",
     description:
-      "Download a generated image and save it locally.",
+      "Download a generated image or video and save it locally. Video filenames (.mp4/.webm/.mov, from generate_video) are fetched from the video store; everything else from image outputs.",
     inputSchema: {
       filename: z
         .string()
         .describe(
-          'Image filename from generate_image results (e.g. "job-abc12345_def67890.jpg")'
+          'Filename from generate_image, run_pipeline or generate_video results (e.g. "job-abc12345_def67890.jpg", "h3-32b0fdac.mp4")'
         ),
       save_path: z
         .string()
@@ -449,10 +451,13 @@ server.registerTool(
     const absPath = resolve(target);
     await mkdir(dirname(absPath), { recursive: true });
 
-    const res = await fetch(`${API_BASE_URL}/outputs/${filename}`, {
+    // Videos live in a separate store: /outputs 404s for them.
+    const isVideo = /\.(mp4|webm|mov)$/i.test(filename);
+    const path = isVideo ? `/video/download/${filename}` : `/outputs/${filename}`;
+    const res = await fetch(`${API_BASE_URL}${path}`, {
       headers: API_KEY ? { "X-API-Key": API_KEY } : {},
     });
-    if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+    if (!res.ok) throw new Error(`Download failed: ${res.status} (${path})`);
     const buffer = Buffer.from(await res.arrayBuffer());
     await writeFile(absPath, buffer);
 
@@ -461,7 +466,7 @@ server.registerTool(
       content: [
         {
           type: "text" as const,
-          text: `Image saved to: ${absPath} (${sizeKb} KB)`,
+          text: `${isVideo ? "Video" : "Image"} saved to: ${absPath} (${sizeKb} KB)`,
         },
       ],
     };
