@@ -31,8 +31,10 @@ Requests without a valid `X-API-Key` header will be rejected with 401.
 | Tool | Description |
 |------|-------------|
 | `generate_image` | Generate a z-image from a text prompt. Waits for completion (up to 3 min). All images go to a private "API_generated" series. |
+| `generate_video` | Animate a previously generated image (pass its job ID). `minimax-h3` (default) generates its own soundtrack; `ltx-2` needs ~52 GB and often can't load. Waits for completion. |
+| `model_status` | Show GPU memory and which models are loaded; check before a video batch, since loading one evicts what's resident. |
 | `get_job_status` | Check status of a generation job by ID. |
-| `download_image` | Download a generated image to the local filesystem. |
+| `download_image` | Download a generated image or video (from `generate_video`) to the local filesystem. |
 | `remove_background` | Remove the background from a local image, saving a transparent RGBA PNG. |
 | `list_pipelines` | List saved node-graph pipelines that can be run. |
 | `get_pipeline_params` | List a pipeline's parameters (name, type, default). |
