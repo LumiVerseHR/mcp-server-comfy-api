@@ -682,6 +682,185 @@ server.registerTool(
   }
 );
 
+// ============== Blender ==============
+// Scripts run headless on the workstation's Blender 4.2 (the blender service behind
+// comfy-api), so a laptop with no Blender gets renders and 3D exports.
+
+interface BlenderArtifact {
+  name: string;
+  size: number;
+  url: string;
+}
+
+interface BlenderJob {
+  job_id: string;
+  status: string;
+  title: string;
+  run_status: string | null;
+  duration: number | null;
+  output: string | null;
+  error: string | null;
+  traceback: string | null;
+  log_tail: string | null;
+  artifacts: BlenderArtifact[];
+  position: number | null;
+}
+
+const BLENDER_INLINE_IMAGE_MAX = 3 * 1024 * 1024;
+const BLENDER_OUTPUT_TAIL = 6000;
+
+async function fetchBlenderFile(a: BlenderArtifact): Promise<Buffer> {
+  const res = await fetch(`${API_BASE_URL}${a.url}`, {
+    headers: API_KEY ? { "X-API-Key": API_KEY } : {},
+  });
+  if (!res.ok) throw new Error(`Download of ${a.name} failed: ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+async function blenderResult(job: BlenderJob, saveDir?: string, returnImage = true) {
+  const content: Array<
+    | { type: "text"; text: string }
+    | { type: "image"; data: string; mimeType: string }
+  > = [];
+  const lines: string[] = [];
+
+  if (job.status === "pending" || job.status === "processing") {
+    lines.push(
+      `Blender job ${job.job_id} is ${job.status}${job.position ? ` (queue #${job.position})` : ""}.`,
+      "Check again with blender_job_status."
+    );
+    return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+  }
+
+  const ok = job.status === "completed";
+  lines.push(
+    `${ok ? "OK" : job.run_status === "timeout" ? "TIMEOUT" : "ERROR"} — Blender job ${job.job_id}` +
+      (job.duration != null ? ` (${job.duration.toFixed(1)}s)` : "")
+  );
+  if (job.error) lines.push(`Error: ${job.error}`);
+  if (job.traceback) lines.push("", "Traceback:", job.traceback.trimEnd());
+  if (!job.traceback && job.log_tail) lines.push("", "Blender log (tail):", job.log_tail.trimEnd());
+  if (job.output) {
+    const out = job.output.length > BLENDER_OUTPUT_TAIL
+      ? "…" + job.output.slice(-BLENDER_OUTPUT_TAIL)
+      : job.output;
+    lines.push("", "Output:", out.trimEnd());
+  }
+
+  if (job.artifacts.length) {
+    lines.push("", "Files:");
+    let saved: string | null = null;
+    if (saveDir) {
+      const { writeFile, mkdir } = await import("node:fs/promises");
+      const { resolve, join, dirname } = await import("node:path");
+      saved = resolve(saveDir);
+      for (const a of job.artifacts) {
+        const target = join(saved, a.name);
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, await fetchBlenderFile(a));
+      }
+    }
+    for (const a of job.artifacts) {
+      lines.push(`  ${a.name} (${(a.size / 1024).toFixed(0)} KB)  ${API_BASE_URL}${a.url}`);
+    }
+    if (saved) lines.push(`Saved to ${saved}`);
+  }
+
+  content.push({ type: "text", text: lines.join("\n") });
+
+  // Showing the render back is what lets the model judge and improve it.
+  const image = returnImage
+    ? job.artifacts.find((a) => /\.(png|jpe?g|webp)$/i.test(a.name) && a.size <= BLENDER_INLINE_IMAGE_MAX)
+    : undefined;
+  if (image) {
+    const ext = image.name.split(".").pop()!.toLowerCase();
+    const mimeType = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
+    content.push({ type: "image", data: (await fetchBlenderFile(image)).toString("base64"), mimeType });
+  }
+  return { content };
+}
+
+server.registerTool(
+  "blender_guide",
+  {
+    title: "Blender Guide",
+    description:
+      "The rules and the `bh` helper reference for blender_run scripts (Blender 4.2, headless, CPU). Read it once before writing your first Blender script in a session.",
+    inputSchema: {},
+  },
+  async () => {
+    const res = await apiFetch("/blender/guide");
+    return { content: [{ type: "text" as const, text: await res.text() }] };
+  }
+);
+
+server.registerTool(
+  "blender_run",
+  {
+    title: "Run Blender Script",
+    description: [
+      "Run a Python (bpy) script in headless Blender 4.2 LTS on the workstation and wait for it. Returns prints, a traceback with your script's line numbers on failure, the files written, and the first render as an image so you can judge and refine it. Read blender_guide first.",
+      "Each run is a fresh Blender with the factory scene; `bpy`, `bh`, `mathutils`, `math` are preloaded; relative paths become downloadable files; continue earlier work with bh.save() then bh.load('blender/<job_id>/scene.blend').",
+      "Rules: (1) 4.x Principled names only (`Specular IOR Level`, `Transmission Weight`, `Emission Color`, `Coat Weight`…) — or use bh.material(color, roughness=, metallic=, transmission=, emission=…). (2) No viewport: view3d operators fail poll(); aim with bh.frame()/bh.look_at(). (3) CPU only: render with Cycles via bh.render(); EEVEE is ~20x slower here. (4) Always set samples (default would be 4096): 16–32 to iterate, 64–128 for finals.",
+      "Quick product shot: build meshes → bh.studio() → bh.frame() → bh.render('render.png'). Cost ≈ 1s + render time.",
+    ].join("\n"),
+    inputSchema: {
+      script: z.string().describe("Python source using bpy and bh"),
+      timeout: z
+        .number()
+        .int()
+        .min(5)
+        .max(3600)
+        .default(300)
+        .describe("Seconds before the run is killed; partial prints are still returned"),
+      title: z
+        .string()
+        .optional()
+        .describe("Label shown on the comfy-api /blender page (default: the script's first # comment)"),
+      save_dir: z
+        .string()
+        .optional()
+        .describe("Local directory to download every produced file into"),
+      return_image: z
+        .boolean()
+        .default(true)
+        .describe("Attach the first rendered image (≤3 MB) to the result"),
+    },
+  },
+  async ({ script, timeout, title, save_dir, return_image }) => {
+    const createRes = await apiFetch("/blender/jobs", {
+      method: "POST",
+      body: JSON.stringify({ script, timeout, title, source: "mcp" }),
+    });
+    let job: BlenderJob = await createRes.json();
+    // Wait out the script's own timeout plus queueing slack, then hand back the job id.
+    const deadline = Date.now() + Math.min(timeout * 1000 + 120000, VIDEO_POLL_TIMEOUT);
+    while ((job.status === "pending" || job.status === "processing") && Date.now() < deadline) {
+      await sleep(job.status === "pending" ? POLL_INTERVAL : 1000);
+      job = await (await apiFetch(`/blender/jobs/${job.job_id}`)).json();
+    }
+    return blenderResult(job, save_dir, return_image);
+  }
+);
+
+server.registerTool(
+  "blender_job_status",
+  {
+    title: "Blender Job Status",
+    description:
+      "Result of a Blender job by id — for a long render blender_run stopped waiting on, or to re-download files.",
+    inputSchema: {
+      job_id: z.string().describe('Blender job id, e.g. "bl-12decade0073"'),
+      save_dir: z.string().optional().describe("Local directory to download the job's files into"),
+      return_image: z.boolean().default(true).describe("Attach the first rendered image (≤3 MB)"),
+    },
+  },
+  async ({ job_id, save_dir, return_image }) => {
+    const job: BlenderJob = await (await apiFetch(`/blender/jobs/${job_id}`)).json();
+    return blenderResult(job, save_dir, return_image);
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
