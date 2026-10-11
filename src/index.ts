@@ -70,13 +70,13 @@ server.registerTool(
   {
     title: "Generate Image",
     description:
-      'Generate an image and wait for it (up to 3 min). Goes to the private "API_generated" series. Three models, all guidance-distilled, so describe what you want rather than what you do not — a negative phrase conditions these toward the thing it names. z-image-turbo: fast, ~3s, the default. qwen-image-2.1: exact text rendering, transparent PNGs, ~16s. krea2-turbo: 12B, strong text and skin detail, ~9s. A cold model costs 10-30s to load; model_status shows what is already resident. Use get_prompt_guide for prompt tips.',
+      'Generate an image and wait for it (up to 3 min). Goes to the private "API_generated" series. Four models, all guidance-distilled, so describe what you want rather than what you do not — a negative phrase conditions these toward the thing it names. z-image-turbo: fast, ~3s, the default. qwen-image-2.1: exact text rendering, transparent PNGs, ~16s. qwen-image-2.1-turbo: the same model distilled to 8 steps, same quality and features, ~7s — prefer it over qwen-image-2.1. krea2-turbo: 12B, strong text and skin detail, ~9s. A cold model costs 10-30s to load; model_status shows what is already resident. Use get_prompt_guide for prompt tips.',
     inputSchema: {
       prompt: z
         .string()
         .describe("Text description of the image to generate"),
       model: z
-        .enum(["z-image-turbo", "qwen-image-2.1", "krea2-turbo"])
+        .enum(["z-image-turbo", "qwen-image-2.1", "qwen-image-2.1-turbo", "krea2-turbo"])
         .default("z-image-turbo")
         .describe("Which model renders it"),
       width: z
@@ -100,7 +100,7 @@ server.registerTool(
         .max(50)
         .optional()
         .describe(
-          "Diffusion steps. Omit to use the model's own default (9 / 25 / 8), which is almost always right."
+          "Diffusion steps. Omit to use the model's own default (z-image 9, qwen-image-2.1 25, the two turbos 8), which is almost always right."
         ),
       cfg: z
         .number()
