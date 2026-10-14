@@ -60,6 +60,55 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const IMAGE_TYPES: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+  bmp: "image/bmp",
+};
+const JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Turn one reference_images entry into a filename the backend can resolve: a job id
+ *  becomes that job's first output, a local file is uploaded, anything else is taken as
+ *  a filename already on the server (a gallery output or an earlier upload). */
+async function resolveReference(ref: string): Promise<string> {
+  if (JOB_ID_RE.test(ref)) {
+    const res = await apiFetch(`/jobs/${ref}`);
+    const job: { status: string; images?: string[] } = await res.json();
+    if (job.status !== "completed" || !job.images?.length) {
+      throw new Error(`Reference job ${ref} has no finished image (status: ${job.status})`);
+    }
+    return job.images[0];
+  }
+
+  const { readFile, stat } = await import("node:fs/promises");
+  const { basename, resolve } = await import("node:path");
+  const abs = resolve(ref.replace(/^~(?=\/)/, process.env.HOME || "~"));
+  const isLocal = await stat(abs).then((st) => st.isFile(), () => false);
+  if (!isLocal) return ref;
+
+  const ext = abs.split(".").pop()?.toLowerCase() || "";
+  const type = IMAGE_TYPES[ext];
+  if (!type) throw new Error(`Reference ${ref} is not a supported image (png, jpg, webp, gif, bmp)`);
+  const body = new FormData();
+  body.append("file", new Blob([await readFile(abs)], { type }), basename(abs));
+  // Multipart: fetch sets the boundary itself, so apiFetch's JSON content type must not apply.
+  const res = await fetch(`${API_BASE_URL}/api/images/upload`, {
+    method: "POST",
+    body,
+    headers: API_KEY ? { "X-API-Key": API_KEY } : {},
+  });
+  if (!res.ok) {
+    throw new Error(`Uploading ${ref} failed: API ${res.status}: ${await res.text().catch(() => "")}`);
+  }
+  const uploaded: { filename: string } = await res.json();
+  return uploaded.filename;
+}
+
+const QWEN_MODELS = ["qwen-image-2.1", "qwen-image-2.1-turbo"];
+
 const server = new McpServer({
   name: "comfy-api-zimage",
   version: "1.0.0",
@@ -70,7 +119,7 @@ server.registerTool(
   {
     title: "Generate Image",
     description:
-      'Generate an image and wait for it (up to 3 min). Goes to the private "API_generated" series. Four models, all guidance-distilled, so describe what you want rather than what you do not — a negative phrase conditions these toward the thing it names. z-image-turbo: fast, ~3s, the default. qwen-image-2.1: exact text rendering, transparent PNGs, ~16s. qwen-image-2.1-turbo: the same model distilled to 8 steps, same quality and features, ~7s — prefer it over qwen-image-2.1. krea2-turbo: 12B, strong text and skin detail, ~9s. A cold model costs 10-30s to load; model_status shows what is already resident. Use get_prompt_guide for prompt tips.',
+      'Generate an image and wait for it (up to 3 min). Goes to the private "API_generated" series. Four models, all guidance-distilled, so describe what you want rather than what you do not — a negative phrase conditions these toward the thing it names. z-image-turbo: fast, ~3s, the default. qwen-image-2.1: exact text rendering, transparent PNGs, ~16s. qwen-image-2.1-turbo: the same model distilled to 8 steps, same quality and features, ~7s — prefer it over qwen-image-2.1. krea2-turbo: 12B, strong text and skin detail, ~9s. The two Qwen models also take transparent (an RGBA PNG with a real alpha channel) and reference_images (edits where <image1> is the target, e.g. "replace the background of <image1> with a beach", or try-on "the person in <image1> wearing the jacket from <image2>"). A cold model costs 10-30s to load; model_status shows what is already resident. Use get_prompt_guide for prompt tips.',
     inputSchema: {
       prompt: z
         .string()
@@ -113,9 +162,43 @@ server.registerTool(
         .int()
         .optional()
         .describe("Random seed for reproducibility. Omit for random."),
+      transparent: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Qwen models only: return an RGBA PNG with a transparent background. Describe the subject alone, e.g. \"a red fox sticker, isolated\"."
+        ),
+      reference_images: z
+        .array(z.string())
+        .max(10)
+        .optional()
+        .describe(
+          "Qwen models only: up to 10 images to edit or draw from, referred to in the prompt as <image1>…<image10>; <image1> is the edit target. Each entry is a local file path (uploaded for you), a job id from an earlier generate_image, or a filename already on the server. width/height still set the output size, so match <image1>'s aspect ratio."
+        ),
     },
   },
-  async ({ prompt, model, width, height, steps, cfg, seed }) => {
+  async ({ prompt, model, width, height, steps, cfg, seed, transparent, reference_images }) => {
+    const refs = reference_images ?? [];
+    if ((transparent || refs.length) && !QWEN_MODELS.includes(model)) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `transparent and reference_images need qwen-image-2.1 or qwen-image-2.1-turbo, not ${model}.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+    let referenceNames: string[];
+    try {
+      referenceNames = await Promise.all(refs.map(resolveReference));
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: (err as Error).message }],
+        isError: true,
+      };
+    }
     const seriesId = await getApiGeneratedSeriesId();
 
     const createRes = await apiFetch("/jobs", {
@@ -129,6 +212,8 @@ server.registerTool(
         ...(steps === undefined ? {} : { steps }),
         cfg,
         seed: seed ?? null,
+        ...(transparent ? { transparent } : {}),
+        ...(referenceNames.length ? { reference_images: referenceNames } : {}),
         priority: 5,
         series_id: seriesId,
       }),
@@ -161,6 +246,8 @@ server.registerTool(
                 `Images: ${images.join(", ")}`,
                 `URLs: ${urls.join(", ")}`,
                 `Seed: ${status.seed ?? "unknown"}`,
+                ...(referenceNames.length ? [`References: ${referenceNames.join(", ")}`] : []),
+                ...(transparent ? ["Transparent: RGBA PNG"] : []),
                 `Series: API_generated (private)`,
                 "",
                 "Use download_image to save the image locally.",
