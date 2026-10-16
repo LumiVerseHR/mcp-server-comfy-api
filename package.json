@@ -1,6 +1,6 @@
 {
   "name": "@lumiversehr/mcp-server-comfy-api",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "MCP server for generating images with ComfyUI API (z-image-turbo)",
   "type": "module",
   "bin": {

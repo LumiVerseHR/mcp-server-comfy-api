@@ -300,7 +300,7 @@ server.registerTool(
   {
     title: "Generate Video",
     description:
-      'Animate an image that was already generated, and wait for it. Both models are image-to-video, so generate_image first and pass the job id it returns. minimax-h3: 12B, 24fps, generates its own soundtrack in the same pass, ~41 GB of VRAM, the default and the one that works. ltx-2: wants ~52 GB, which this machine often cannot free, so it may fail on arrival. Video takes minutes; check model_status first, since loading one of these evicts whatever is resident.',
+      'Animate an image that was already generated, and wait for it. Both models are image-to-video, so generate_image first and pass the job id it returns. Both run 24fps and generate their own soundtrack in the same pass. minimax-h3: 12B, ~41 GB of VRAM, the default; a 1024x576 5 s clip takes ~125 s. ltx-2.5: 22B distilled, ~41 GB, about 4-6x faster (~20 s warm, ~30 s cold for the same clip) at similar quality; width and height are rounded down to multiples of 64. Video takes minutes; check model_status first, since loading one of these evicts whatever is resident.',
     inputSchema: {
       prompt: z
         .string()
@@ -311,7 +311,7 @@ server.registerTool(
         .string()
         .describe("Job id of the image to animate, from generate_image"),
       model: z
-        .enum(["minimax-h3", "ltx-2"])
+        .enum(["minimax-h3", "ltx-2.5"])
         .default("minimax-h3")
         .describe("Which model renders it"),
       width: z
@@ -335,7 +335,7 @@ server.registerTool(
         .max(257)
         .default(124)
         .describe(
-          "Frames at 24fps. H3 decodes 17n+5 and rounds up to the next valid count, between 5 and 15 seconds. 124 is ~5.2s."
+          "Frames at 24fps, rounded up to the next count the model decodes: 17n+5 for H3 (5 to 15 seconds), 8n+1 for LTX-2.5. 124 is ~5.2s."
         ),
       audio: z
         .boolean()
