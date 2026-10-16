@@ -300,7 +300,7 @@ server.registerTool(
   {
     title: "Generate Video",
     description:
-      'Animate an image that was already generated, and wait for it. Both models are image-to-video, so generate_image first and pass the job id it returns. Both run 24fps and generate their own soundtrack in the same pass. minimax-h3: 12B, ~41 GB of VRAM, the default; a 1024x576 5 s clip takes ~125 s. ltx-2.5: 22B distilled, ~41 GB, about 4-6x faster (~20 s warm, ~30 s cold for the same clip) at similar quality; width and height are rounded down to multiples of 64. Video takes minutes; check model_status first, since loading one of these evicts whatever is resident.',
+      'Animate an image that was already generated, and wait for it. Both models are image-to-video, so generate_image first and pass the job id it returns. Both run 24fps and generate their own soundtrack in the same pass. ltx-2.5 (the default, preferred): 22B distilled, ~41 GB of VRAM; a 1024x576 5 s clip takes ~20 s warm, ~30 s cold; width and height are rounded down to multiples of 64. minimax-h3: 12B, ~41 GB, 4-6x slower (~125 s for the same clip) at similar quality, but follows explicit camera moves such as an orbit more faithfully; pick it for those. Video takes minutes; check model_status first, since loading one of these evicts whatever is resident.',
     inputSchema: {
       prompt: z
         .string()
@@ -311,37 +311,37 @@ server.registerTool(
         .string()
         .describe("Job id of the image to animate, from generate_image"),
       model: z
-        .enum(["minimax-h3", "ltx-2.5"])
-        .default("minimax-h3")
+        .enum(["ltx-2.5", "minimax-h3"])
+        .default("ltx-2.5")
         .describe("Which model renders it"),
       width: z
         .number()
         .int()
         .min(256)
         .max(1920)
-        .default(960)
-        .describe("Video width (a multiple of 32 for H3)"),
+        .default(1024)
+        .describe("Video width (a multiple of 64 for LTX-2.5, 32 for H3)"),
       height: z
         .number()
         .int()
         .min(256)
         .max(1080)
-        .default(544)
-        .describe("Video height (a multiple of 32 for H3)"),
+        .default(576)
+        .describe("Video height (a multiple of 64 for LTX-2.5, 32 for H3)"),
       frames: z
         .number()
         .int()
         .min(9)
         .max(257)
-        .default(124)
+        .default(121)
         .describe(
-          "Frames at 24fps, rounded up to the next count the model decodes: 17n+5 for H3 (5 to 15 seconds), 8n+1 for LTX-2.5. 124 is ~5.2s."
+          "Frames at 24fps, rounded up to the next count the model decodes: 8n+1 for LTX-2.5, 17n+5 for H3 (5 to 15 seconds). 121 is ~5s."
         ),
       audio: z
         .boolean()
         .default(true)
         .describe(
-          "Generate a soundtrack. H3 denoises audio alongside the picture, so turning this off does not save time; it produces a silent file."
+          "Generate a soundtrack. Both models denoise audio alongside the picture, so turning this off does not save time; it produces a silent file."
         ),
     },
   },
