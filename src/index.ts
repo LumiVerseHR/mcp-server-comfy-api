@@ -302,7 +302,7 @@ server.registerTool(
   {
     title: "Generate Video",
     description:
-      'Make a video and wait for it. Image-to-video: generate_image first and pass the job id it returns. Text-to-video (ltx-2.5 only): omit source_job_id and describe the whole shot in the prompt. First + last frame (ltx-2.5 only): also pass last_source_job_id; the clip starts on the first image and ends on the second, so describe the change between them (~24 s for 5 s). The clip joins the image\'s series (text-to-video: the private "API_generated"), unless series_id says otherwise. Both models run 24fps and generate their own soundtrack in the same pass. ltx-2.5 (the default, preferred): 22B distilled, ~41 GB of VRAM; a 1024x576 5 s clip takes ~20 s warm, ~30 s cold; width and height are rounded down to multiples of 64. minimax-h3: 12B, ~41 GB, 4-6x slower (~125 s for the same clip) at similar quality, but follows explicit camera moves such as an orbit more faithfully; pick it for those. Video takes minutes; check model_status first, since loading one of these evicts whatever is resident.',
+      'Make a video and wait for it. Image-to-video: generate_image first and pass the job id it returns. Text-to-video (ltx-2.5 or pika-h3-flex): omit source_job_id and describe the whole shot in the prompt. First + last frame (ltx-2.5 or pika-h3-flex): also pass last_source_job_id; the clip starts on the first image and ends on the second, so describe the change between them (~24 s for 5 s). The clip joins the image\'s series (text-to-video: the private "API_generated"), unless series_id says otherwise. All three models run 24fps and generate their own soundtrack in the same pass. ltx-2.5 (the default, preferred): 22B distilled, ~41 GB of VRAM; a 1024x576 5 s clip takes ~20 s warm, ~30 s cold; width and height are rounded down to multiples of 64. minimax-h3: 12B, ~41 GB, 4-6x slower (~125 s for the same clip) at similar quality, but follows explicit camera moves such as an orbit more faithfully; pick it for those. pika-h3-flex: Pika\'s 6-step adapter on H3, ~42 GB; a 832x480 5 s clip takes ~45 s (1344x768: ~166 s), native sizes 480p and 768p; does all three modes. Video takes minutes; check model_status first, since loading one of these evicts whatever is resident.',
     inputSchema: {
       prompt: z
         .string()
@@ -312,18 +312,18 @@ server.registerTool(
       source_job_id: z
         .string()
         .optional()
-        .describe("Job id of the image to animate, from generate_image. Omit for text-to-video (ltx-2.5 only)."),
+        .describe("Job id of the image to animate, from generate_image. Omit for text-to-video (ltx-2.5 or pika-h3-flex)."),
       last_source_job_id: z
         .string()
         .optional()
-        .describe("Job id of the image the clip should end on (first + last frame, ltx-2.5 only). Needs source_job_id."),
+        .describe("Job id of the image the clip should end on (first + last frame, ltx-2.5 or pika-h3-flex). Needs source_job_id."),
       series_id: z
         .number()
         .int()
         .optional()
         .describe("Series for the clip (series are shared with images). Omitted: the source image's series, or API_generated for text-to-video."),
       model: z
-        .enum(["ltx-2.5", "minimax-h3"])
+        .enum(["ltx-2.5", "minimax-h3", "pika-h3-flex"])
         .default("ltx-2.5")
         .describe("Which model renders it"),
       width: z
@@ -332,14 +332,14 @@ server.registerTool(
         .min(256)
         .max(1920)
         .default(1024)
-        .describe("Video width (a multiple of 64 for LTX-2.5, 32 for H3)"),
+        .describe("Video width (a multiple of 64 for LTX-2.5, 32 for H3 and Pika)"),
       height: z
         .number()
         .int()
         .min(256)
         .max(1080)
         .default(576)
-        .describe("Video height (a multiple of 64 for LTX-2.5, 32 for H3)"),
+        .describe("Video height (a multiple of 64 for LTX-2.5, 32 for H3 and Pika)"),
       frames: z
         .number()
         .int()
@@ -370,12 +370,12 @@ server.registerTool(
         isError: true,
       };
     }
-    if ((t2v || last_source_job_id) && model !== "ltx-2.5") {
+    if ((t2v || last_source_job_id) && model === "minimax-h3") {
       return {
         content: [
           {
             type: "text" as const,
-            text: `${t2v ? "Text-to-video" : "First + last frame"} is ltx-2.5 only; minimax-h3 can only animate a single image.`,
+            text: `${t2v ? "Text-to-video" : "First + last frame"} needs ltx-2.5 or pika-h3-flex; minimax-h3 can only animate a single image.`,
           },
         ],
         isError: true,
