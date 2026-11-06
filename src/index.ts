@@ -302,7 +302,7 @@ server.registerTool(
   {
     title: "Generate Video",
     description:
-      'Make a video and wait for it. Image-to-video: generate_image first and pass the job id it returns. Text-to-video (ltx-2.5 or pika-h3-flex): omit source_job_id and describe the whole shot in the prompt. First + last frame (ltx-2.5 or pika-h3-flex): also pass last_source_job_id; the clip starts on the first image and ends on the second, so describe the change between them (~24 s for 5 s). The clip joins the image\'s series (text-to-video: the private "API_generated"), unless series_id says otherwise. All three models run 24fps and generate their own soundtrack in the same pass. ltx-2.5 (the default, preferred): 22B distilled, ~41 GB of VRAM; a 1024x576 5 s clip takes ~20 s warm, ~30 s cold; width and height are rounded down to multiples of 64. minimax-h3: 12B, ~41 GB, 4-6x slower (~125 s for the same clip) at similar quality, but follows explicit camera moves such as an orbit more faithfully; pick it for those. pika-h3-flex: Pika\'s 6-step adapter on H3, ~42 GB; a 832x480 5 s clip takes ~45 s (1344x768: ~166 s), native sizes 480p and 768p; does all three modes. Video takes minutes; check model_status first, since loading one of these evicts whatever is resident.',
+      'Make a video and wait for it. Image-to-video: generate_image first and pass the job id it returns. Text-to-video (ltx-2.5 or pika-h3-flex): omit source_job_id and describe the whole shot in the prompt. First + last frame (ltx-2.5 or pika-h3-flex): also pass last_source_job_id; the clip starts on the first image and ends on the second, so describe the change between them (~24 s for 5 s). The clip joins the image\'s series (text-to-video: the private "API_generated"), unless series_id says otherwise. All three models run 24fps and generate their own soundtrack in the same pass. ltx-2.5 (the default, preferred): 22B distilled, ~41 GB of VRAM; a 1024x576 5 s clip takes ~20 s warm, ~30 s cold; width and height are rounded down to multiples of 64. minimax-h3: 12B, ~41 GB, 4-6x slower (~125 s for the same clip) at similar quality, but follows explicit camera moves such as an orbit more faithfully; pick it for those. pika-h3-flex: Pika\'s 6-step adapter on H3, ~42 GB; a 832x480 5 s clip takes ~45 s (1344x768: ~166 s), native sizes 480p and 768p; does all three modes, plus reference-to-video: pass reference_images (1-9) and name them <Picture 1>… in the prompt; ~90-120 s at 832x480 (references ride through every step, so it is about twice i2v). Video takes minutes; check model_status first, since loading one of these evicts whatever is resident.',
     inputSchema: {
       prompt: z
         .string()
@@ -317,11 +317,19 @@ server.registerTool(
         .string()
         .optional()
         .describe("Job id of the image the clip should end on (first + last frame, ltx-2.5 or pika-h3-flex). Needs source_job_id."),
+      reference_images: z
+        .array(z.string())
+        .min(1)
+        .max(9)
+        .optional()
+        .describe(
+          "Reference-to-video (pika-h3-flex only): 1-9 images the clip is built around (people, products, places), each a job id from generate_image, a local file path (uploaded for you) or a filename on the server. Name them in the prompt as <Picture 1>, <Picture 2>… in this order and say what each is, e.g. \"The woman in <Picture 1> rides the scooter from <Picture 2> along the coast\". Do not combine with source_job_id."
+        ),
       series_id: z
         .number()
         .int()
         .optional()
-        .describe("Series for the clip (series are shared with images). Omitted: the source image's series, or API_generated for text-to-video."),
+        .describe("Series for the clip (series are shared with images). Omitted: the source image's series, or API_generated for text-to-video and reference-to-video."),
       model: z
         .enum(["ltx-2.5", "minimax-h3", "pika-h3-flex"])
         .default("ltx-2.5")
@@ -357,8 +365,23 @@ server.registerTool(
         ),
     },
   },
-  async ({ prompt, source_job_id, last_source_job_id, series_id, model, width, height, frames, audio }) => {
-    const t2v = !source_job_id;
+  async ({ prompt, source_job_id, last_source_job_id, reference_images, series_id, model, width, height, frames, audio }) => {
+    const r2v = !!reference_images?.length;
+    if (r2v && (source_job_id || last_source_job_id || model !== "pika-h3-flex")) {
+      return {
+        content: [{ type: "text" as const, text: "reference_images is its own mode: use model pika-h3-flex and leave out source_job_id and last_source_job_id." }],
+        isError: true,
+      };
+    }
+    let referenceNames: string[] = [];
+    if (r2v) {
+      try {
+        referenceNames = await Promise.all(reference_images!.map((ref) => (JOB_ID_RE.test(ref) ? Promise.resolve(ref) : resolveReference(ref))));
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true };
+      }
+    }
+    const t2v = !source_job_id && !r2v;
     if (last_source_job_id && t2v) {
       return {
         content: [
@@ -385,10 +408,11 @@ server.registerTool(
       method: "POST",
       body: JSON.stringify({
         prompt,
-        ...(t2v ? { mode: "t2v" } : last_source_job_id ? { mode: "flf", source_job_id, last_source_job_id } : { source_job_id }),
-        // Image-to-video follows its image unless told otherwise; text-to-video has no
-        // image, so it lands where MCP images do
-        ...(series_id !== undefined ? { series_id } : t2v ? { series_id: await getApiGeneratedSeriesId() } : {}),
+        ...(r2v ? { mode: "r2v", reference_images: referenceNames }
+          : t2v ? { mode: "t2v" } : last_source_job_id ? { mode: "flf", source_job_id, last_source_job_id } : { source_job_id }),
+        // Image-to-video follows its image unless told otherwise; text- and reference-to-video
+        // have no single image, so they land where MCP images do
+        ...(series_id !== undefined ? { series_id } : t2v || r2v ? { series_id: await getApiGeneratedSeriesId() } : {}),
         model,
         width,
         height,
