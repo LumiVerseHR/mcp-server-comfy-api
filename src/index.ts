@@ -302,7 +302,7 @@ server.registerTool(
   {
     title: "Generate Video",
     description:
-      'Make a video and wait for it. Image-to-video: generate_image first and pass the job id it returns. Text-to-video (ltx-2.5 or pika-h3-flex): omit source_job_id and describe the whole shot in the prompt. First + last frame (ltx-2.5 or pika-h3-flex): also pass last_source_job_id; the clip starts on the first image and ends on the second, so describe the change between them (~24 s for 5 s). The clip joins the image\'s series (text-to-video: the private "API_generated"), unless series_id says otherwise. All three models run 24fps and generate their own soundtrack in the same pass. ltx-2.5 (the default, preferred): 22B distilled, ~41 GB of VRAM; a 1024x576 5 s clip takes ~20 s warm, ~30 s cold; width and height are rounded down to multiples of 64. minimax-h3: 12B, ~41 GB, 4-6x slower (~125 s for the same clip) at similar quality, but follows explicit camera moves such as an orbit more faithfully; pick it for those. pika-h3-flex: Pika\'s 6-step adapter on H3, ~42 GB; a 832x480 5 s clip takes ~45 s (1344x768: ~166 s), native sizes 480p and 768p; does all three modes, plus reference-to-video: pass reference_images (1-9) and name them <Picture 1>… in the prompt; ~90-120 s at 832x480 (references ride through every step, so it is about twice i2v). Video takes minutes; check model_status first, since loading one of these evicts whatever is resident.',
+      'Make a video and wait for it. Image-to-video: generate_image first and pass the job id it returns. Text-to-video: omit source_job_id and describe the whole shot in the prompt. First + last frame: also pass last_source_job_id; the clip starts on the first image and ends on the second, so describe the change between them. Reference-to-video (pika-h3-flex): pass reference_images (1-9) and name them <Picture 1>… in the prompt. The clip joins the image\'s series (text- and reference-to-video: the private "API_generated"), unless series_id says otherwise. All models run 24fps and generate their own soundtrack in the same pass. Leave width, height and frames out to get each model\'s default (~5 s). pika-h3-flex (the default and preferred, best quality): Pika\'s 6-step adapter on MiniMax H3, ~42 GB of VRAM; does all four modes; 832x480 5 s takes ~45 s warm, ~60 s cold (1344x768: ~166 s); native sizes 480p and 768p; reference-to-video ~90-120 s at 832x480. ltx-2.5: 22B distilled, ~41 GB, the fastest; 1024x576 5 s in ~20 s warm, ~30 s cold; text, image and first + last frame; sides rounded down to multiples of 64; pick it when speed matters more than quality. minimax-h3: plain H3 at 20 steps, image-to-video only, ~125 s; rarely needed now. Video takes minutes; check model_status first, since loading one of these evicts whatever is resident.',
     inputSchema: {
       prompt: z
         .string()
@@ -331,37 +331,37 @@ server.registerTool(
         .optional()
         .describe("Series for the clip (series are shared with images). Omitted: the source image's series, or API_generated for text-to-video and reference-to-video."),
       model: z
-        .enum(["ltx-2.5", "minimax-h3", "pika-h3-flex"])
-        .default("ltx-2.5")
+        .enum(["pika-h3-flex", "ltx-2.5", "minimax-h3"])
+        .default("pika-h3-flex")
         .describe("Which model renders it"),
       width: z
         .number()
         .int()
         .min(256)
         .max(1920)
-        .default(1024)
-        .describe("Video width (a multiple of 64 for LTX-2.5, 32 for H3 and Pika)"),
+        .optional()
+        .describe("Video width (a multiple of 64 for LTX-2.5, 32 for H3 and Pika). Omitted: the model's default (Pika 832, LTX-2.5 1024, H3 960)."),
       height: z
         .number()
         .int()
         .min(256)
         .max(1080)
-        .default(576)
-        .describe("Video height (a multiple of 64 for LTX-2.5, 32 for H3 and Pika)"),
+        .optional()
+        .describe("Video height (a multiple of 64 for LTX-2.5, 32 for H3 and Pika). Omitted: the model's default (Pika 480, LTX-2.5 576, H3 544)."),
       frames: z
         .number()
         .int()
         .min(9)
         .max(257)
-        .default(121)
+        .optional()
         .describe(
-          "Frames at 24fps, rounded up to the next count the model decodes: 8n+1 for LTX-2.5, 17n+5 for H3 (5 to 15 seconds). 121 is ~5s."
+          "Frames at 24fps, rounded up to the next count the model decodes: 8n+1 for LTX-2.5, 17n+5 for H3 and Pika (5 to 15 seconds). Omitted: ~5 s (124 for Pika and H3, 121 for LTX-2.5)."
         ),
       audio: z
         .boolean()
         .default(true)
         .describe(
-          "Generate a soundtrack. Both models denoise audio alongside the picture, so turning this off does not save time; it produces a silent file."
+          "Generate a soundtrack. Every model denoises audio alongside the picture, so turning this off does not save time; it produces a silent file."
         ),
     },
   },
@@ -414,9 +414,10 @@ server.registerTool(
         // have no single image, so they land where MCP images do
         ...(series_id !== undefined ? { series_id } : t2v || r2v ? { series_id: await getApiGeneratedSeriesId() } : {}),
         model,
-        width,
-        height,
-        frames,
+        // Left out, the backend uses the model's own size and ~5 s length
+        ...(width !== undefined ? { width } : {}),
+        ...(height !== undefined ? { height } : {}),
+        ...(frames !== undefined ? { frames } : {}),
         audio,
         priority: 5,
       }),
@@ -431,6 +432,9 @@ server.registerTool(
         status: string;
         video_filename?: string;
         error?: string;
+        width?: number;
+        height?: number;
+        frames?: number;
       } = await statusRes.json();
 
       if (status.status === "completed") {
@@ -442,10 +446,11 @@ server.registerTool(
               text: [
                 "Video generated.",
                 `Job ID: ${jobId}`,
-                `Model: ${model}${t2v ? " (text-to-video)" : ""}`,
+                `Model: ${model}${t2v ? " (text-to-video)" : r2v ? " (reference-to-video)" : last_source_job_id ? " (first + last frame)" : ""}`,
                 `File: ${name}`,
                 `URL: ${API_BASE_URL}/video/download/${name}`,
-                `Frames: ${frames} (~${(frames / 24).toFixed(1)}s at 24fps)`,
+                status.width && status.height ? `Size: ${status.width}x${status.height}` : "",
+                status.frames ?? frames ? `Frames: ${status.frames ?? frames} (~${((status.frames ?? frames)! / 24).toFixed(1)}s at 24fps)` : "",
                 audio ? "" : "Silent (audio disabled)",
               ]
                 .filter(Boolean)
