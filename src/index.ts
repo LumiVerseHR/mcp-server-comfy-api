@@ -108,6 +108,8 @@ async function resolveReference(ref: string): Promise<string> {
 }
 
 const QWEN_MODELS = ["qwen-image-2.1", "qwen-image-2.1-turbo"];
+// Models that take reference_images: the Qwen pair (<image1>…) and P-H3-Image (<Picture 1>…)
+const REFERENCE_MODELS = [...QWEN_MODELS, "p-h3-image"];
 
 const server = new McpServer({
   name: "comfy-api-zimage",
@@ -119,13 +121,13 @@ server.registerTool(
   {
     title: "Generate Image",
     description:
-      'Generate an image and wait for it (up to 3 min). Goes to the private "API_generated" series. Four models, all guidance-distilled, so describe what you want rather than what you do not — a negative phrase conditions these toward the thing it names. z-image-turbo: fast, ~3s, the default. qwen-image-2.1: exact text rendering, transparent PNGs, ~16s. qwen-image-2.1-turbo: the same model distilled to 8 steps, same quality and features, ~7s — prefer it over qwen-image-2.1. krea2-turbo: 12B, strong text and skin detail, ~9s. The two Qwen models also take transparent (an RGBA PNG with a real alpha channel) and reference_images (edits where <image1> is the target, e.g. "replace the background of <image1> with a beach", or try-on "the person in <image1> wearing the jacket from <image2>"). A cold model costs 10-30s to load; model_status shows what is already resident. Use get_prompt_guide for prompt tips.',
+      'Generate an image and wait for it (up to 3 min). Goes to the private "API_generated" series. Five models, all guidance-distilled, so describe what you want rather than what you do not — a negative phrase conditions these toward the thing it names. z-image-turbo: fast, ~3s, the default. qwen-image-2.1: exact text rendering, transparent PNGs, ~16s. qwen-image-2.1-turbo: the same model distilled to 8 steps, same quality and features, ~7s — prefer it over qwen-image-2.1. krea2-turbo: 12B, strong text and skin detail, ~9s. p-h3-image: Pruna\'s 33B model distilled from MiniMax H3, photorealism and editorial/film looks, short quoted text, ~3s at 1 MP and ~8s at 2048x2048 once loaded (~14s cold). The two Qwen models also take transparent (an RGBA PNG with a real alpha channel) and reference_images (edits where <image1> is the target, e.g. "replace the background of <image1> with a beach", or try-on "the person in <image1> wearing the jacket from <image2>"). p-h3-image takes up to 8 reference_images, referred to as <Picture 1>…<Picture 8>; its edits keep the scene far better at 2048x2048 and when the prompt names what to keep ("Make it a stormy night; keep the lighthouse, island and composition the same.") — a bare "Edit <Picture 1>. …" at 1024 can re-render the whole scene. A cold model costs 10-30s to load; model_status shows what is already resident. Use get_prompt_guide for prompt tips.',
     inputSchema: {
       prompt: z
         .string()
         .describe("Text description of the image to generate"),
       model: z
-        .enum(["z-image-turbo", "qwen-image-2.1", "qwen-image-2.1-turbo", "krea2-turbo"])
+        .enum(["z-image-turbo", "qwen-image-2.1", "qwen-image-2.1-turbo", "krea2-turbo", "p-h3-image"])
         .default("z-image-turbo")
         .describe("Which model renders it"),
       width: z
@@ -149,7 +151,7 @@ server.registerTool(
         .max(50)
         .optional()
         .describe(
-          "Diffusion steps. Omit to use the model's own default (z-image 9, qwen-image-2.1 25, the two turbos 8), which is almost always right."
+          "Diffusion steps. Omit to use the model's own default (z-image 9, qwen-image-2.1 25, the turbos and p-h3-image 8), which is almost always right."
         ),
       cfg: z
         .number()
@@ -173,22 +175,22 @@ server.registerTool(
         .max(10)
         .optional()
         .describe(
-          "Qwen models only: up to 10 images to edit or draw from, referred to in the prompt as <image1>…<image10>; <image1> is the edit target. Each entry is a local file path (uploaded for you), a job id from an earlier generate_image, or a filename already on the server. width/height still set the output size, so match <image1>'s aspect ratio."
+          "Qwen models: up to 10 images to edit or draw from, referred to in the prompt as <image1>…<image10>; <image1> is the edit target. p-h3-image: up to 8, as <Picture 1>…<Picture 8>, <Picture 1> being the one edited. Each entry is a local file path (uploaded for you), a job id from an earlier generate_image, or a filename already on the server. width/height still set the output size, so match <image1>'s aspect ratio."
         ),
     },
   },
   async ({ prompt, model, width, height, steps, cfg, seed, transparent, reference_images }) => {
     const refs = reference_images ?? [];
-    if ((transparent || refs.length) && !QWEN_MODELS.includes(model)) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `transparent and reference_images need qwen-image-2.1 or qwen-image-2.1-turbo, not ${model}.`,
-          },
-        ],
-        isError: true,
-      };
+    const unsupported =
+      transparent && !QWEN_MODELS.includes(model)
+        ? `transparent needs qwen-image-2.1 or qwen-image-2.1-turbo, not ${model}.`
+        : refs.length && !REFERENCE_MODELS.includes(model)
+          ? `reference_images need qwen-image-2.1, qwen-image-2.1-turbo or p-h3-image, not ${model}.`
+          : model === "p-h3-image" && refs.length > 8
+            ? "p-h3-image takes at most 8 reference_images."
+            : null;
+    if (unsupported) {
+      return { content: [{ type: "text" as const, text: unsupported }], isError: true };
     }
     let referenceNames: string[];
     try {
