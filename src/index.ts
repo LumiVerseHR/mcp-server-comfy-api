@@ -575,6 +575,95 @@ server.registerTool(
   }
 );
 
+const MESH_POLL_TIMEOUT = 900000; // a textured model takes ~1.5-3 min, more when queued
+
+server.registerTool(
+  "generate_3d",
+  {
+    title: "Generate 3D Model",
+    description:
+      'Make a textured 3D model (GLB) from one picture with TRELLIS.2 on the workstation, and wait for it. Give exactly one input: prompt (rendered to an image first with image_model, then modelled), image_job_id (an image from generate_image) or image_path (a local file, uploaded for you). One object on a plain background models best: write prompts like "A brass desk lamp with a green glass shade, single object centred, plain light grey background, soft studio light". The back is inferred, so a 3/4 view of the object helps. Defaults: 1024 detail, the surface rebuilt and reduced to ~200k faces, a 2048px texture (colour, roughness, metal), ~1.5 min once loaded plus ~5 s for a prompt\'s image, ~10 MB GLB. Loading TRELLIS.2 adds ~20 s and ~8 GB of GPU memory; jobs also wait for ~6 GB of free RAM (the texture is baked on the CPU). Models go to the image\'s series, or the private "API_generated" for prompts and files. Pass save_dir to download the GLB.',
+    inputSchema: {
+      prompt: z.string().optional().describe("Describe one object to render and model"),
+      image_job_id: z.string().optional().describe("Job id of an image from generate_image"),
+      image_path: z.string().optional().describe("Local image file (png, jpg, webp)"),
+      image_model: z
+        .enum(["z-image-turbo", "qwen-image-2.1", "qwen-image-2.1-turbo", "qwen-image-2.1-uncensored", "krea2-turbo", "p-h3-image"])
+        .default("z-image-turbo")
+        .describe("Model for a prompt's image"),
+      resolution: z.enum(["512", "1024", "1536"]).default("1024").describe("Shape detail: 512 quickest, 1536 finest (slower)"),
+      texture: z.boolean().default(true).describe("Bake a texture; false gives a plain grey mesh (~35 s)"),
+      texture_size: z.union([z.literal(1024), z.literal(2048), z.literal(4096)]).default(2048),
+      target_faces: z.number().int().min(5000).max(1000000).default(200000)
+        .describe("Reduce the rebuilt surface to about this many faces (50k suits game props)"),
+      seed: z.number().int().optional(),
+      series_id: z.number().int().optional().describe("Series for the model (and a prompt's image)"),
+      save_dir: z.string().optional().describe("Local directory to save the GLB into"),
+    },
+  },
+  async ({ prompt, image_job_id, image_path, image_model, resolution, texture, texture_size, target_faces, seed, series_id, save_dir }) => {
+    const inputs = [prompt, image_job_id, image_path].filter((x) => x);
+    if (inputs.length !== 1) {
+      return { content: [{ type: "text" as const, text: "Give exactly one of prompt, image_job_id or image_path." }], isError: true };
+    }
+    let source: Record<string, unknown>;
+    try {
+      source = prompt ? { prompt, image_model }
+        : image_job_id ? { source_job_id: image_job_id }
+        : { image_filename: await resolveReference(image_path!) };
+    } catch (err) {
+      return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true };
+    }
+    const series = series_id ?? (image_job_id ? undefined : await getApiGeneratedSeriesId());
+    const createRes = await apiFetch("/3d/jobs", {
+      method: "POST",
+      body: JSON.stringify({
+        ...source, resolution, texture, texture_size, target_faces,
+        ...(seed !== undefined ? { seed } : {}),
+        ...(series !== undefined ? { series_id: series } : {}),
+        priority: 5,
+      }),
+    });
+    const job: { job_id: string } = await createRes.json();
+    const start = Date.now();
+    while (Date.now() - start < MESH_POLL_TIMEOUT) {
+      const st: {
+        status: string; error?: string; glb_url?: string; glb_size?: number; source_image?: string;
+        started_at?: string; completed_at?: string;
+      } = await (await apiFetch(`/3d/jobs/${job.job_id}`)).json();
+      if (st.status === "completed" && st.glb_url) {
+        const url = `${API_BASE_URL}${st.glb_url}`;
+        const lines = [
+          "3D model generated.",
+          `Job ID: ${job.job_id}`,
+          `GLB: ${url} (${((st.glb_size ?? 0) / 1e6).toFixed(1)} MB)`,
+          st.source_image ? `Input image: ${st.source_image}` : "",
+          st.started_at && st.completed_at
+            ? `Modelled in ${Math.round((Date.parse(st.completed_at) - Date.parse(st.started_at)) / 1000)} s`
+            : "",
+        ];
+        if (save_dir) {
+          const { writeFile, mkdir } = await import("node:fs/promises");
+          const { join, resolve } = await import("node:path");
+          const dir = resolve(save_dir.replace(/^~(?=\/)/, process.env.HOME || "~"));
+          await mkdir(dir, { recursive: true });
+          const res = await fetch(url, { headers: API_KEY ? { "X-API-Key": API_KEY } : {} });
+          if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+          const target = join(dir, st.glb_url.split("/").pop()!);
+          await writeFile(target, Buffer.from(await res.arrayBuffer()));
+          lines.push(`Saved to: ${target}`);
+        }
+        return { content: [{ type: "text" as const, text: lines.filter(Boolean).join("\n") }] };
+      }
+      if (st.status === "failed" || st.status === "cancelled") {
+        return { content: [{ type: "text" as const, text: `3D model ${st.status}.\nJob ID: ${job.job_id}\nError: ${st.error ?? "unknown"}` }], isError: true };
+      }
+      await sleep(3000);
+    }
+    return { content: [{ type: "text" as const, text: `Still modelling after ${MESH_POLL_TIMEOUT / 60000} min.\nJob ID: ${job.job_id}\nIt keeps running; it will appear on the /3d page.` }] };
+  }
+);
+
 server.registerTool(
   "download_image",
   {
