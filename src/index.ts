@@ -582,7 +582,7 @@ server.registerTool(
   {
     title: "Generate 3D Model",
     description:
-      'Make a textured 3D model (GLB) from one picture with TRELLIS.2 on the workstation, and wait for it. Give exactly one input: prompt (rendered to an image first with image_model, then modelled), image_job_id (an image from generate_image) or image_path (a local file, uploaded for you). One object on a plain background models best: write prompts like "A brass desk lamp with a green glass shade, single object centred, plain light grey background, soft studio light". The back is inferred, so a 3/4 view of the object helps. Defaults: 1024 detail, the surface rebuilt and reduced to ~200k faces, a 2048px texture (colour, roughness, metal), ~1.5 min once loaded plus ~5 s for a prompt\'s image, ~10 MB GLB. Loading TRELLIS.2 adds ~20 s and ~8 GB of GPU memory; jobs also wait for ~6 GB of free RAM (the texture is baked on the CPU). Models go to the image\'s series, or the private "API_generated" for prompts and files. Pass save_dir to download the GLB.',
+      'Make a textured 3D model (GLB) from one picture with TRELLIS.2 on the workstation, and wait for it. Give exactly one input: prompt (rendered to an image first with image_model, then modelled), image_job_id (an image from generate_image) or image_path (a local file, uploaded for you). One object on a plain background models best: write prompts like "A brass desk lamp with a green glass shade, single object centred, plain light grey background, soft studio light". The back is inferred, so a 3/4 view of the object helps. Defaults: 1024 detail, the surface rebuilt and reduced to ~200k faces, a 2048px texture (colour, roughness, metal), ~1.5 min once loaded plus ~5 s for a prompt\'s image, ~10 MB GLB. Loading TRELLIS.2 adds ~20 s and ~8 GB of GPU memory; jobs also wait for ~6 GB of free RAM (the texture is baked on the CPU). Models go to the image\'s series, or the private "API_generated" for prompts and files. Pass save_dir to download the GLB. With model "idol" the result is a 3D Gaussian splat (.ply) instead: seconds rather than minutes, photoreal from every angle, viewable in splat viewers, but not a mesh (no texture, faces or editing tools).',
     inputSchema: {
       prompt: z.string().optional().describe("Describe one object to render and model"),
       image_job_id: z.string().optional().describe("Job id of an image from generate_image"),
@@ -596,12 +596,20 @@ server.registerTool(
       texture_size: z.union([z.literal(1024), z.literal(2048), z.literal(4096)]).default(2048),
       target_faces: z.number().int().min(5000).max(1000000).default(200000)
         .describe("Reduce the rebuilt surface to about this many faces (50k suits game props)"),
+      model: z.enum(["trellis-2", "idol"]).default("trellis-2")
+        .describe("trellis-2: textured mesh (GLB). idol: 3D Gaussian splat (PLY) in seconds, photoreal from any angle but not a mesh"),
+      gaussians: z.number().int().min(32768).max(1048576).multipleOf(32).default(262144)
+        .describe("idol only: number of Gaussians"),
+      clean_input: z.boolean().default(true)
+        .describe("First redraw the picture with Qwen Turbo: the object alone, complete, plain background, flat light (~10 s). Fixes sheets, scenes, harsh light"),
+      clean_surface: z.boolean().default(true)
+        .describe("Shape-preserving simplify, smoothed shading and a baked normal map (~12 s)"),
       seed: z.number().int().optional(),
       series_id: z.number().int().optional().describe("Series for the model (and a prompt's image)"),
       save_dir: z.string().optional().describe("Local directory to save the GLB into"),
     },
   },
-  async ({ prompt, image_job_id, image_path, image_model, resolution, texture, texture_size, target_faces, seed, series_id, save_dir }) => {
+  async ({ prompt, image_job_id, image_path, image_model, resolution, texture, texture_size, target_faces, model, gaussians, clean_input, clean_surface, seed, series_id, save_dir }) => {
     const inputs = [prompt, image_job_id, image_path].filter((x) => x);
     if (inputs.length !== 1) {
       return { content: [{ type: "text" as const, text: "Give exactly one of prompt, image_job_id or image_path." }], isError: true };
@@ -618,7 +626,7 @@ server.registerTool(
     const createRes = await apiFetch("/3d/jobs", {
       method: "POST",
       body: JSON.stringify({
-        ...source, resolution, texture, texture_size, target_faces,
+        ...source, model, gaussians, resolution, texture, texture_size, target_faces, clean_input, clean_surface,
         ...(seed !== undefined ? { seed } : {}),
         ...(series !== undefined ? { series_id: series } : {}),
         priority: 5,
@@ -636,7 +644,7 @@ server.registerTool(
         const lines = [
           "3D model generated.",
           `Job ID: ${job.job_id}`,
-          `GLB: ${url} (${((st.glb_size ?? 0) / 1e6).toFixed(1)} MB)`,
+          `${st.glb_url.endsWith(".ply") ? "Splat (PLY)" : "GLB"}: ${url} (${((st.glb_size ?? 0) / 1e6).toFixed(1)} MB)`,
           st.source_image ? `Input image: ${st.source_image}` : "",
           st.started_at && st.completed_at
             ? `Modelled in ${Math.round((Date.parse(st.completed_at) - Date.parse(st.started_at)) / 1000)} s`
