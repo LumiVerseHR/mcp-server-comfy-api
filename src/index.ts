@@ -602,6 +602,8 @@ server.registerTool(
         .describe("idol only: number of Gaussians"),
       clean_input: z.boolean().default(true)
         .describe("First redraw the picture with Qwen Turbo: the object alone, complete, plain background, flat light (~10 s). Fixes sheets, scenes, harsh light"),
+      multi_view: z.boolean().default(false)
+        .describe("trellis-2 only: Qwen-Image-Edit-2511 draws front, left, back and right (~1 min) and the model is built from all four. Better backs for characters and figures; boxy objects can warp"),
       clean_surface: z.boolean().default(true)
         .describe("Shape-preserving simplify, smoothed shading and a baked normal map (~12 s)"),
       seed: z.number().int().optional(),
@@ -609,7 +611,7 @@ server.registerTool(
       save_dir: z.string().optional().describe("Local directory to save the GLB into"),
     },
   },
-  async ({ prompt, image_job_id, image_path, image_model, resolution, texture, texture_size, target_faces, model, gaussians, clean_input, clean_surface, seed, series_id, save_dir }) => {
+  async ({ prompt, image_job_id, image_path, image_model, resolution, texture, texture_size, target_faces, model, gaussians, clean_input, clean_surface, multi_view, seed, series_id, save_dir }) => {
     const inputs = [prompt, image_job_id, image_path].filter((x) => x);
     if (inputs.length !== 1) {
       return { content: [{ type: "text" as const, text: "Give exactly one of prompt, image_job_id or image_path." }], isError: true };
@@ -626,7 +628,7 @@ server.registerTool(
     const createRes = await apiFetch("/3d/jobs", {
       method: "POST",
       body: JSON.stringify({
-        ...source, model, gaussians, resolution, texture, texture_size, target_faces, clean_input, clean_surface,
+        ...source, model, gaussians, resolution, texture, texture_size, target_faces, clean_input, clean_surface, multi_view,
         ...(seed !== undefined ? { seed } : {}),
         ...(series !== undefined ? { series_id: series } : {}),
         priority: 5,
